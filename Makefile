@@ -5,7 +5,8 @@ INCLUDES := -Iinclude
 
 SRC_DIR := src
 BUILD_DIR := build
-TARGET := lexer
+BIN_DIR := bin
+TARGET := $(BIN_DIR)/lexer
 
 # ===== 自动收集源文件 =====
 SRCS := $(wildcard $(SRC_DIR)/*.cpp)
@@ -16,6 +17,7 @@ all: $(TARGET)
 
 # ===== 链接 =====
 $(TARGET): $(OBJS)
+	@mkdir -p $(BIN_DIR)
 	$(CXX) $^ -o $@
 
 # ===== 编译 =====

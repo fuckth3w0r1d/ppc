@@ -1,12 +1,13 @@
-#include <algorithm>
 #include <cstdlib>
+#include <fstream>
 #include <iostream>
+#include <limits>
+#include <map>
 #include <queue>
 #include <set>
 #include <stack>
-#include <stdexcept>
 #include <string>
-#include <unordered_set>
+#include <sstream>
 #include <vector>
 #include "logger.h"
 
@@ -35,18 +36,6 @@ struct ReToken
     ReToken(const std::vector<char>& s) : type(CHAR_CLASS), val('\0'), char_set(s) {}
 };
 
-bool is_letter(char c)
-{
-    return (c >= 'a' && c <= 'z') ||
-           (c >= 'A' && c <= 'Z') ||
-           (c == '_');
-}
-
-bool is_digit(char c)
-{
-    return (c >= '0' && c <= '9');
-}
-
 bool is_space(char c)
 {
     return (c == ' '  ||
@@ -62,11 +51,6 @@ bool is_regex_op(char ch)
     return (ch == '|' || ch == '(' ||
             ch == ')' || ch == '*' ||
             ch == '+' || ch == '?');
-}
-
-bool is_atom_token(const ReToken& t)
-{
-    return t.type == LITERAL || t.type == CHAR_CLASS;
 }
 
 bool is_atom_end(const ReToken& t)
@@ -295,6 +279,7 @@ std::vector<ReToken> infix_to_postfix(const std::vector<ReToken>& infix)
 // ==================================== 后缀正则转NFA
 
 static constexpr int EPS = -1;
+static constexpr int ASCII_COUNT = 128;
 
 struct Edge
 {
@@ -305,13 +290,15 @@ struct Edge
 struct State
 {
     std::vector<Edge> edges;
+    int token_kind = 0;   // 0 表示不是接受状态
+    int priority = std::numeric_limits<int>::max();
 };
 
 struct NFA
 {
     std::vector<State> states;
-    int start;
-    int accept;
+    int start = -1;
+    int accept = -1;
 };
 
 struct NFAFragment
@@ -446,72 +433,767 @@ NFA regex_to_nfa(const std::string& re)
     return build_nfa_from_postfix(postfix);
 }
 
-void print_postfix(const std::vector<ReToken>& postfix)
+// ==================================== 合并多条词法规则
+
+enum TokenKind
 {
-    for(const auto& token : postfix)
+    TK_NONE = 0,
+    TK_SKIP,
+
+    TK_KW_INT,
+    TK_KW_RETURN,
+    TK_KW_IF,
+    TK_KW_ELSE,
+    TK_KW_WHILE,
+    TK_KW_FOR,
+    TK_KW_VOID,
+    TK_KW_CHAR,
+    TK_KW_FLOAT,
+    TK_KW_DOUBLE,
+
+    TK_IDENT,
+    TK_NUMBER,
+    TK_FLOAT,
+    TK_STRING,
+    TK_CHAR_LITERAL,
+
+    TK_EQ,
+    TK_NE,
+    TK_LE,
+    TK_GE,
+    TK_AND,
+    TK_OR,
+
+    TK_ASSIGN,
+    TK_PLUS,
+    TK_MINUS,
+    TK_STAR,
+    TK_SLASH,
+    TK_PERCENT,
+    TK_LT,
+    TK_GT,
+    TK_NOT,
+
+    TK_SEMI,
+    TK_COMMA,
+    TK_DOT,
+    TK_LPAREN,
+    TK_RPAREN,
+    TK_LBRACE,
+    TK_RBRACE,
+    TK_LBRACKET,
+    TK_RBRACKET
+};
+
+std::string token_kind_name(int kind)
+{
+    switch(kind)
     {
-        switch(token.type)
-        {
-            case LITERAL:
-                std::cout << token.val << ' ';
-                break;
-            case CHAR_CLASS:
-                std::cout << "[class] ";
-                break;
-            case OR:
-                std::cout << "| ";
-                break;
-            case STAR:
-                std::cout << "* ";
-                break;
-            case PLUS:
-                std::cout << "+ ";
-                break;
-            case QMARK:
-                std::cout << "? ";
-                break;
-            case CONCAT:
-                std::cout << ". ";
-                break;
-            default:
-                break;
-        }
+        case TK_SKIP: return "SKIP";
+        case TK_KW_INT: return "KW_INT";
+        case TK_KW_RETURN: return "KW_RETURN";
+        case TK_KW_IF: return "KW_IF";
+        case TK_KW_ELSE: return "KW_ELSE";
+        case TK_KW_WHILE: return "KW_WHILE";
+        case TK_KW_FOR: return "KW_FOR";
+        case TK_KW_VOID: return "KW_VOID";
+        case TK_KW_CHAR: return "KW_CHAR";
+        case TK_KW_FLOAT: return "KW_FLOAT";
+        case TK_KW_DOUBLE: return "KW_DOUBLE";
+        case TK_IDENT: return "IDENT";
+        case TK_NUMBER: return "NUMBER";
+        case TK_FLOAT: return "FLOAT";
+        case TK_STRING: return "STRING";
+        case TK_CHAR_LITERAL: return "CHAR";
+        case TK_EQ: return "EQ";
+        case TK_NE: return "NE";
+        case TK_LE: return "LE";
+        case TK_GE: return "GE";
+        case TK_AND: return "AND";
+        case TK_OR: return "OR";
+        case TK_ASSIGN: return "ASSIGN";
+        case TK_PLUS: return "PLUS";
+        case TK_MINUS: return "MINUS";
+        case TK_STAR: return "STAR";
+        case TK_SLASH: return "SLASH";
+        case TK_PERCENT: return "PERCENT";
+        case TK_LT: return "LT";
+        case TK_GT: return "GT";
+        case TK_NOT: return "NOT";
+        case TK_SEMI: return "SEMI";
+        case TK_COMMA: return "COMMA";
+        case TK_DOT: return "DOT";
+        case TK_LPAREN: return "LPAREN";
+        case TK_RPAREN: return "RPAREN";
+        case TK_LBRACE: return "LBRACE";
+        case TK_RBRACE: return "RBRACE";
+        case TK_LBRACKET: return "LBRACKET";
+        case TK_RBRACKET: return "RBRACKET";
+        default: return "UNKNOWN";
     }
-    std::cout << '\n';
 }
 
-void print_nfa(const NFA& nfa)
+void mark_nfa_accept(NFA& nfa, int token_kind, int priority)
 {
-    std::cout << "start: " << nfa.start << '\n';
-    std::cout << "accept: " << nfa.accept << '\n';
+    nfa.states[nfa.accept].token_kind = token_kind;
+    nfa.states[nfa.accept].priority = priority;
+}
 
-    for(size_t i = 0; i < nfa.states.size(); ++i)
+NFA literal_to_nfa(const std::string& text)
+{
+    NFA nfa;
+    nfa.start = new_nfa_state(nfa);
+    int cur = nfa.start;
+    for(char ch : text)
     {
-        for(const auto& e : nfa.states[i].edges)
+        int next = new_nfa_state(nfa);
+        add_nfa_edge(nfa, cur, next, static_cast<unsigned char>(ch));
+        cur = next;
+    }
+    nfa.accept = cur;
+    return nfa;
+}
+
+NFA char_set_plus_to_nfa(const std::vector<char>& chars)
+{
+    NFA nfa;
+    int s = new_nfa_state(nfa);
+    int t = new_nfa_state(nfa);
+    for(char ch : chars)
+    {
+        add_nfa_edge(nfa, s, t, static_cast<unsigned char>(ch));
+        add_nfa_edge(nfa, t, t, static_cast<unsigned char>(ch));
+    }
+    nfa.start = s;
+    nfa.accept = t;
+    return nfa;
+}
+
+template<typename Pred>
+void add_ascii_edges_if(NFA& nfa, int from, int to, Pred pred)
+{
+    for(int ch = 0; ch < ASCII_COUNT; ++ch)
+    {
+        if(pred(ch))
         {
-            std::cout << i << " -> " << e.to << " : ";
-            if(e.sym == EPS)
-                std::cout << "EPS";
-            else
-                std::cout << static_cast<char>(e.sym);
-            std::cout << '\n';
+            add_nfa_edge(nfa, from, to, ch);
         }
     }
 }
 
-int main()
+bool is_normal_string_char(int ch)
 {
-    std::string re = "a(b|c)*d[0-9]?";
+    return ch >= 0 && ch < ASCII_COUNT &&
+           ch != '"' &&
+           ch != '\\' &&
+           ch != '\n' &&
+           ch != '\r';
+}
 
-    std::vector<ReToken> tokens = tokenize_regex(re);
-    std::vector<ReToken> infix = insert_concat(tokens);
-    std::vector<ReToken> postfix = infix_to_postfix(infix);
+bool is_normal_char_literal_char(int ch)
+{
+    return ch >= 0 && ch < ASCII_COUNT &&
+           ch != '\'' &&
+           ch != '\\' &&
+           ch != '\n' &&
+           ch != '\r';
+}
 
-    std::cout << "postfix: ";
-    print_postfix(postfix);
+bool is_escape_body_char(int ch)
+{
+    return ch >= 0 && ch < ASCII_COUNT &&
+           ch != '\n' &&
+           ch != '\r';
+}
 
-    NFA nfa = build_nfa_from_postfix(postfix);
-    print_nfa(nfa);
+NFA line_comment_to_nfa()
+{
+    NFA nfa;
+    int s = new_nfa_state(nfa);
+    int slash = new_nfa_state(nfa);
+    int body = new_nfa_state(nfa);
+
+    add_nfa_edge(nfa, s, slash, '/');
+    add_nfa_edge(nfa, slash, body, '/');
+    add_ascii_edges_if(nfa, body, body, is_escape_body_char);
+
+    nfa.start = s;
+    nfa.accept = body;
+    return nfa;
+}
+
+NFA block_comment_to_nfa()
+{
+    NFA nfa;
+    int s = new_nfa_state(nfa);
+    int slash = new_nfa_state(nfa);
+    int body = new_nfa_state(nfa);
+    int star = new_nfa_state(nfa);
+    int accept = new_nfa_state(nfa);
+
+    add_nfa_edge(nfa, s, slash, '/');
+    add_nfa_edge(nfa, slash, body, '*');
+
+    for(int ch = 0; ch < ASCII_COUNT; ++ch)
+    {
+        if(ch == '*')
+        {
+            add_nfa_edge(nfa, body, star, ch);
+            add_nfa_edge(nfa, star, star, ch);
+        }
+        else
+        {
+            add_nfa_edge(nfa, body, body, ch);
+        }
+
+        if(ch == '/')
+        {
+            add_nfa_edge(nfa, star, accept, ch);
+        }
+        else if(ch != '*')
+        {
+            add_nfa_edge(nfa, star, body, ch);
+        }
+    }
+
+    nfa.start = s;
+    nfa.accept = accept;
+    return nfa;
+}
+
+NFA string_literal_to_nfa()
+{
+    NFA nfa;
+    int s = new_nfa_state(nfa);
+    int body = new_nfa_state(nfa);
+    int esc = new_nfa_state(nfa);
+    int accept = new_nfa_state(nfa);
+
+    add_nfa_edge(nfa, s, body, '"');
+    add_ascii_edges_if(nfa, body, body, is_normal_string_char);
+    add_ascii_edges_if(nfa, esc, body, is_escape_body_char);
+    add_nfa_edge(nfa, body, esc, '\\');
+    add_nfa_edge(nfa, body, accept, '"');
+
+    nfa.start = s;
+    nfa.accept = accept;
+    return nfa;
+}
+
+NFA char_literal_to_nfa()
+{
+    NFA nfa;
+    int s = new_nfa_state(nfa);
+    int body = new_nfa_state(nfa);
+    int one_char = new_nfa_state(nfa);
+    int esc = new_nfa_state(nfa);
+    int accept = new_nfa_state(nfa);
+
+    add_nfa_edge(nfa, s, body, '\'');
+    add_ascii_edges_if(nfa, body, one_char, is_normal_char_literal_char);
+    add_ascii_edges_if(nfa, esc, one_char, is_escape_body_char);
+    add_nfa_edge(nfa, body, esc, '\\');
+    add_nfa_edge(nfa, one_char, accept, '\'');
+
+    nfa.start = s;
+    nfa.accept = accept;
+    return nfa;
+}
+
+NFA float_literal_to_nfa()
+{
+    NFA nfa;
+    int s = new_nfa_state(nfa);
+    int int_part = new_nfa_state(nfa);
+    int dot_first = new_nfa_state(nfa);
+    int frac = new_nfa_state(nfa);
+
+    add_nfa_edge(nfa, s, dot_first, '.');
+    add_nfa_edge(nfa, int_part, frac, '.');
+
+    for(char ch = '0'; ch <= '9'; ++ch)
+    {
+        add_nfa_edge(nfa, s, int_part, ch);
+        add_nfa_edge(nfa, int_part, int_part, ch);
+        add_nfa_edge(nfa, dot_first, frac, ch);
+        add_nfa_edge(nfa, frac, frac, ch);
+    }
+
+    nfa.start = s;
+    nfa.accept = frac;
+    return nfa;
+}
+
+NFA make_regex_rule(int kind, int priority, const std::string& re)
+{
+    NFA nfa = regex_to_nfa(re);
+    mark_nfa_accept(nfa, kind, priority);
+    return nfa;
+}
+
+NFA make_literal_rule(int kind, int priority, const std::string& text)
+{
+    NFA nfa = literal_to_nfa(text);
+    mark_nfa_accept(nfa, kind, priority);
+    return nfa;
+}
+
+NFA make_char_set_plus_rule(int kind, int priority, const std::vector<char>& chars)
+{
+    NFA nfa = char_set_plus_to_nfa(chars);
+    mark_nfa_accept(nfa, kind, priority);
+    return nfa;
+}
+
+NFA make_nfa_rule(int kind, int priority, NFA nfa)
+{
+    mark_nfa_accept(nfa, kind, priority);
+    return nfa;
+}
+
+NFA combine_rules_to_nfa(const std::vector<NFA>& rules)
+{
+    logger::debug("combine_rules_to_nfa rule count: ", rules.size());
+
+    NFA combined;
+    combined.start = new_nfa_state(combined);
+
+    for(const auto& rule : rules)
+    {
+        int offset = combined.states.size();
+        for(const auto& st : rule.states)
+        {
+            combined.states.push_back(st);
+        }
+        for(size_t i = offset; i < combined.states.size(); ++i)
+        {
+            for(auto& e : combined.states[i].edges)
+            {
+                e.to += offset;
+            }
+        }
+        add_nfa_edge(combined, combined.start, rule.start + offset, EPS);
+    }
+
+    logger::debug("combine_rules_to_nfa state count: ", combined.states.size());
+    return combined;
+}
+
+// ==================================== NFA 子集构造为 DFA
+
+struct DFAState
+{
+    std::vector<int> trans;
+    int token_kind = TK_NONE;
+    std::set<int> nfa_states;
+
+    DFAState() : trans(ASCII_COUNT, -1) {}
+};
+
+struct DFA
+{
+    std::vector<DFAState> states;
+    int start = -1;
+};
+
+std::set<int> epsilon_closure(const NFA& nfa, const std::set<int>& input)
+{
+    std::set<int> result = input;
+    std::stack<int> st;
+    for(int s : input)
+    {
+        st.push(s);
+    }
+
+    while(!st.empty())
+    {
+        int cur = st.top();
+        st.pop();
+        for(const auto& e : nfa.states[cur].edges)
+        {
+            if(e.sym == EPS && result.count(e.to) == 0)
+            {
+                result.insert(e.to);
+                st.push(e.to);
+            }
+        }
+    }
+    return result;
+}
+
+std::set<int> move_set(const NFA& nfa, const std::set<int>& input, int sym)
+{
+    std::set<int> result;
+    for(int s : input)
+    {
+        for(const auto& e : nfa.states[s].edges)
+        {
+            if(e.sym == sym)
+            {
+                result.insert(e.to);
+            }
+        }
+    }
+    return result;
+}
+
+void set_dfa_accept_from_nfa_states(DFAState& dstate, const NFA& nfa)
+{
+    int best_priority = std::numeric_limits<int>::max();
+    for(int s : dstate.nfa_states)
+    {
+        const State& nstate = nfa.states[s];
+        if(nstate.token_kind != TK_NONE && nstate.priority < best_priority)
+        {
+            dstate.token_kind = nstate.token_kind;
+            best_priority = nstate.priority;
+        }
+    }
+}
+
+int add_dfa_state(DFA& dfa, const NFA& nfa, const std::set<int>& nfa_states)
+{
+    DFAState dstate;
+    dstate.nfa_states = nfa_states;
+    set_dfa_accept_from_nfa_states(dstate, nfa);
+    dfa.states.push_back(dstate);
+    return dfa.states.size() - 1;
+}
+
+DFA nfa_to_dfa(const NFA& nfa)
+{
+    logger::debug("nfa_to_dfa input state count: ", nfa.states.size());
+
+    DFA dfa;
+    std::map<std::set<int>, int> ids;
+    std::queue<std::set<int>> work;
+
+    std::set<int> start_input;
+    start_input.insert(nfa.start);
+    std::set<int> start_set = epsilon_closure(nfa, start_input);
+
+    dfa.start = add_dfa_state(dfa, nfa, start_set);
+    ids[start_set] = dfa.start;
+    work.push(start_set);
+
+    while(!work.empty())
+    {
+        std::set<int> cur_set = work.front();
+        work.pop();
+        int cur_id = ids[cur_set];
+
+        for(int sym = 0; sym < ASCII_COUNT; ++sym)
+        {
+            std::set<int> moved = move_set(nfa, cur_set, sym);
+            if(moved.empty())
+            {
+                continue;
+            }
+
+            std::set<int> next_set = epsilon_closure(nfa, moved);
+            if(ids.count(next_set) == 0)
+            {
+                int next_id = add_dfa_state(dfa, nfa, next_set);
+                ids[next_set] = next_id;
+                work.push(next_set);
+            }
+            dfa.states[cur_id].trans[sym] = ids[next_set];
+        }
+    }
+
+    logger::debug("nfa_to_dfa output state count: ", dfa.states.size());
+    return dfa;
+}
+
+// ==================================== DFA 最小化
+
+std::vector<int> build_minimize_signature(const DFA& dfa, const std::vector<int>& cls, int state)
+{
+    std::vector<int> sig;
+    sig.push_back(dfa.states[state].token_kind);
+    for(int sym = 0; sym < ASCII_COUNT; ++sym)
+    {
+        int to = dfa.states[state].trans[sym];
+        sig.push_back(to == -1 ? -1 : cls[to]);
+    }
+    return sig;
+}
+
+DFA minimize_dfa(const DFA& dfa)
+{
+    logger::debug("minimize_dfa input state count: ", dfa.states.size());
+
+    int n = dfa.states.size();
+    std::vector<int> cls(n, 0);
+    std::map<int, int> token_class;
+    int class_count = 0;
+
+    for(int i = 0; i < n; ++i)
+    {
+        int token = dfa.states[i].token_kind;
+        if(token_class.count(token) == 0)
+        {
+            token_class[token] = class_count++;
+        }
+        cls[i] = token_class[token];
+    }
+
+    bool changed = true;
+    while(changed)
+    {
+        changed = false;
+        std::map<std::vector<int>, int> sig_class;
+        std::vector<int> next_cls(n, 0);
+        int next_count = 0;
+
+        for(int i = 0; i < n; ++i)
+        {
+            std::vector<int> sig = build_minimize_signature(dfa, cls, i);
+            if(sig_class.count(sig) == 0)
+            {
+                sig_class[sig] = next_count++;
+            }
+            next_cls[i] = sig_class[sig];
+        }
+
+        if(next_cls != cls)
+        {
+            changed = true;
+            cls = next_cls;
+            class_count = next_count;
+        }
+    }
+
+    DFA min_dfa;
+    min_dfa.states.resize(class_count);
+    min_dfa.start = cls[dfa.start];
+
+    std::vector<bool> filled(class_count, false);
+    for(int i = 0; i < n; ++i)
+    {
+        int c = cls[i];
+        if(filled[c])
+        {
+            continue;
+        }
+
+        filled[c] = true;
+        min_dfa.states[c].token_kind = dfa.states[i].token_kind;
+        for(int sym = 0; sym < ASCII_COUNT; ++sym)
+        {
+            int to = dfa.states[i].trans[sym];
+            min_dfa.states[c].trans[sym] = to == -1 ? -1 : cls[to];
+        }
+    }
+
+    logger::debug("minimize_dfa output state count: ", min_dfa.states.size());
+    return min_dfa;
+}
+
+// ==================================== 最小 C 词法规则和扫描器
+
+std::vector<NFA> build_min_c_rules()
+{
+    std::vector<NFA> rules;
+    int p = 1;
+
+    auto literal = [&](int kind, const std::string& text) {
+        rules.push_back(make_literal_rule(kind, p++, text));
+    };
+    auto regex = [&](int kind, const std::string& re) {
+        rules.push_back(make_regex_rule(kind, p++, re));
+    };
+    auto raw_nfa = [&](int kind, NFA nfa) {
+        rules.push_back(make_nfa_rule(kind, p++, nfa));
+    };
+
+    rules.push_back(make_char_set_plus_rule(TK_SKIP, p++, {' ', '\t', '\n', '\r', '\f', '\v'}));
+    raw_nfa(TK_SKIP, line_comment_to_nfa());
+    raw_nfa(TK_SKIP, block_comment_to_nfa());
+
+    literal(TK_KW_INT, "int");
+    literal(TK_KW_RETURN, "return");
+    literal(TK_KW_IF, "if");
+    literal(TK_KW_ELSE, "else");
+    literal(TK_KW_WHILE, "while");
+    literal(TK_KW_FOR, "for");
+    literal(TK_KW_VOID, "void");
+    literal(TK_KW_CHAR, "char");
+    literal(TK_KW_FLOAT, "float");
+    literal(TK_KW_DOUBLE, "double");
+
+    regex(TK_IDENT, "[a-zA-Z_]([a-zA-Z0-9_])*");
+    raw_nfa(TK_FLOAT, float_literal_to_nfa());
+    regex(TK_NUMBER, "[0-9]+");
+    raw_nfa(TK_STRING, string_literal_to_nfa());
+    raw_nfa(TK_CHAR_LITERAL, char_literal_to_nfa());
+
+    literal(TK_EQ, "==");
+    literal(TK_NE, "!=");
+    literal(TK_LE, "<=");
+    literal(TK_GE, ">=");
+    literal(TK_AND, "&&");
+    literal(TK_OR, "||");
+
+    literal(TK_ASSIGN, "=");
+    literal(TK_PLUS, "+");
+    literal(TK_MINUS, "-");
+    literal(TK_STAR, "*");
+    literal(TK_SLASH, "/");
+    literal(TK_PERCENT, "%");
+    literal(TK_LT, "<");
+    literal(TK_GT, ">");
+    literal(TK_NOT, "!");
+
+    literal(TK_SEMI, ";");
+    literal(TK_COMMA, ",");
+    literal(TK_DOT, ".");
+    literal(TK_LPAREN, "(");
+    literal(TK_RPAREN, ")");
+    literal(TK_LBRACE, "{");
+    literal(TK_RBRACE, "}");
+    literal(TK_LBRACKET, "[");
+    literal(TK_RBRACKET, "]");
+
+    return rules;
+}
+
+struct Lexeme
+{
+    int token_kind;
+    std::string text;
+    int line;
+    int col;
+};
+
+void advance_position(const std::string& text, int& line, int& col)
+{
+    for(char ch : text)
+    {
+        if(ch == '\n')
+        {
+            line++;
+            col = 1;
+        }
+        else
+        {
+            col++;
+        }
+    }
+}
+
+std::vector<Lexeme> scan_source(const DFA& dfa, const std::string& source)
+{
+    std::vector<Lexeme> tokens;
+    size_t pos = 0;
+    int line = 1;
+    int col = 1;
+
+    while(pos < source.size())
+    {
+        int state = dfa.start;
+        size_t i = pos;
+        size_t last_accept_pos = pos;
+        int last_accept_kind = TK_NONE;
+
+        while(i < source.size())
+        {
+            unsigned char ch = static_cast<unsigned char>(source[i]);
+            if(ch >= ASCII_COUNT)
+            {
+                break;
+            }
+
+            int next = dfa.states[state].trans[ch];
+            if(next == -1)
+            {
+                break;
+            }
+
+            state = next;
+            i++;
+
+            if(dfa.states[state].token_kind != TK_NONE)
+            {
+                last_accept_pos = i;
+                last_accept_kind = dfa.states[state].token_kind;
+            }
+        }
+
+        if(last_accept_kind == TK_NONE)
+        {
+            logger::error("lex error near line ", line);
+            logger::error("column: ", col);
+            logger::error("char: ", source[pos]);
+            std::exit(EXIT_FAILURE);
+        }
+
+        std::string text = source.substr(pos, last_accept_pos - pos);
+        if(last_accept_kind != TK_SKIP)
+        {
+            tokens.push_back({last_accept_kind, text, line, col});
+        }
+
+        advance_position(text, line, col);
+        pos = last_accept_pos;
+    }
+
+    return tokens;
+}
+
+std::string read_file(const std::string& path)
+{
+    std::ifstream in(path);
+    if(!in)
+    {
+        logger::error("cannot open input file: ", path);
+        std::exit(EXIT_FAILURE);
+    }
+
+    std::ostringstream ss;
+    ss << in.rdbuf();
+    return ss.str();
+}
+
+void print_tokens(std::ostream& os, const std::vector<Lexeme>& tokens)
+{
+    for(const auto& tok : tokens)
+    {
+        os << tok.line << ':' << tok.col
+           << "  " << token_kind_name(tok.token_kind)
+           << "  " << tok.text << '\n';
+    }
+}
+
+int main(int argc, char** argv)
+{
+    if(argc != 3)
+    {
+        logger::error("usage: ./lexer <input.c> <output.tokens>");
+        return EXIT_FAILURE;
+    }
+
+    std::string source = read_file(argv[1]);
+
+    std::vector<NFA> rules = build_min_c_rules();
+    NFA nfa = combine_rules_to_nfa(rules);
+    DFA dfa = nfa_to_dfa(nfa);
+    DFA min_dfa = minimize_dfa(dfa);
+
+    std::vector<Lexeme> tokens = scan_source(min_dfa, source);
+
+    std::ofstream out(argv[2]);
+    if(!out)
+    {
+        logger::error("cannot open output file: ", argv[2]);
+        return EXIT_FAILURE;
+    }
+    print_tokens(out, tokens);
+
+    logger::info("NFA states: ", nfa.states.size());
+    logger::info("DFA states: ", dfa.states.size());
+    logger::info("min DFA states: ", min_dfa.states.size());
+    logger::info("token file: ", argv[2]);
 
     return 0;
 }

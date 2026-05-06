@@ -1,2 +1,11 @@
-build/*
+# build output
+/build/
+/lexer
+/bin/*
+!/bin/.gitkeep
+
+# generated token streams
+/test/*.tokens
+
+# object files
 *.o
