@@ -11,29 +11,34 @@
 #include <vector>
 #include "logger.h"
 
+[[noreturn]] void die(const std::string& msg)
+{
+    logger::error(msg);
+    std::exit(EXIT_FAILURE);
+}
 
 // ============================= 获得后缀正则token流
-enum ReTokenType
+enum RegexTokenType
 {
-    LITERAL,      // 普通字符
-    CHAR_CLASS,   // 字符类，如 [a-zA-Z_]
-    OR,           // |
-    STAR,         // *
-    PLUS,         // +
-    QMARK,        // ?
-    LPAREN,       // (
-    RPAREN,       // )
-    CONCAT        // 连接符，内部使用
+    RE_LITERAL,      // 普通字符
+    RE_CHAR_CLASS,   // 字符类，如 [a-zA-Z_]
+    RE_OR,           // |
+    RE_STAR,         // *
+    RE_PLUS,         // +
+    RE_OPTIONAL,     // ?
+    RE_LPAREN,       // (
+    RE_RPAREN,       // )
+    RE_CONCAT        // 连接符，内部使用
 };
 
-struct ReToken
+struct RegexToken
 {
-    ReTokenType type;
-    char val;
-    std::vector<char> char_set;
+    RegexTokenType type;
+    char ch;
+    std::vector<char> chars;
 
-    ReToken(ReTokenType t, char v) : type(t), val(v) {}
-    ReToken(const std::vector<char>& s) : type(CHAR_CLASS), val('\0'), char_set(s) {}
+    RegexToken(RegexTokenType t, char v) : type(t), ch(v) {}
+    RegexToken(const std::vector<char>& s) : type(RE_CHAR_CLASS), ch('\0'), chars(s) {}
 };
 
 bool is_space(char c)
@@ -46,32 +51,39 @@ bool is_space(char c)
             c == '\v');
 }
 
-bool is_regex_op(char ch)
+bool is_atom_end(const RegexToken& t)
 {
-    return (ch == '|' || ch == '(' ||
-            ch == ')' || ch == '*' ||
-            ch == '+' || ch == '?');
+    return t.type == RE_LITERAL   ||
+           t.type == RE_CHAR_CLASS ||
+           t.type == RE_RPAREN     ||
+           t.type == RE_OPTIONAL   ||
+           t.type == RE_PLUS       ||
+           t.type == RE_STAR;
 }
 
-bool is_atom_end(const ReToken& t)
+bool is_atom_begin(const RegexToken& t)
 {
-    return t.type == LITERAL   ||
-           t.type == CHAR_CLASS ||
-           t.type == RPAREN    ||
-           t.type == QMARK     ||
-           t.type == PLUS      ||
-           t.type == STAR;
+    return t.type == RE_LITERAL ||
+           t.type == RE_CHAR_CLASS ||
+           t.type == RE_LPAREN;
 }
 
-bool is_atom_begin(const ReToken& t)
+bool is_regex_operand(const RegexToken& t)
 {
-    return t.type == LITERAL ||
-           t.type == CHAR_CLASS ||
-           t.type == LPAREN;
+    return t.type == RE_LITERAL || t.type == RE_CHAR_CLASS;
+}
+
+bool is_regex_operator(const RegexToken& t)
+{
+    return t.type == RE_OR     ||
+           t.type == RE_CONCAT ||
+           t.type == RE_STAR   ||
+           t.type == RE_PLUS   ||
+           t.type == RE_OPTIONAL;
 }
 
 // 判断两个正则 token 之间是否需要连接符
-bool need_concat(const ReToken& a, const ReToken& b)
+bool need_concat(const RegexToken& a, const RegexToken& b)
 {
     return is_atom_end(a) && is_atom_begin(b);
 }
@@ -82,59 +94,50 @@ std::vector<char> parse_char_class(const std::string& re, size_t& i)
     i++;
     if(i >= re.size())
     {
-        logger::error("unterminated char class");
-        std::exit(EXIT_FAILURE);
+        die("unterminated char class");
     }
 
     std::set<char> chars;
-    bool has_any = false;
     while(i < re.size() && re[i] != ']')
     {
         if(i + 2 < re.size() && re[i + 1] == '-' && re[i + 2] != ']')
         {
-            char l = re[i];
-            char r = re[i + 2];
-            if(l > r)
+            char first = re[i];
+            char last = re[i + 2];
+            if(first > last)
             {
-                logger::error("invalid range in char class");
-                std::exit(EXIT_FAILURE);
+                die("invalid range in char class");
             }
-            for(char c = l; c <= r; ++c)
+            for(char c = first; c <= last; ++c)
             {
                 chars.insert(c);
             }
             i += 3;
-            has_any = true;
         }
         else
         {
             chars.insert(re[i]);
             i++;
-            has_any = true;
         }
     }
 
     if(i >= re.size() || re[i] != ']')
     {
-        logger::error("unterminated char class");
-        std::exit(EXIT_FAILURE);
+        die("unterminated char class");
     }
 
-    if(!has_any)
+    if(chars.empty())
     {
-        logger::error("empty char class");
-        std::exit(EXIT_FAILURE);
+        die("empty char class");
     }
 
     std::vector<char> result(chars.begin(), chars.end());
     return result;
 }
 
-std::vector<ReToken> tokenize_regex(const std::string& re)
+std::vector<RegexToken> tokenize_regex(const std::string& re)
 {
-    logger::debug("tokenize_regex begin: ", re);
-
-    std::vector<ReToken> output;
+    std::vector<RegexToken> output;
     for(size_t i = 0; i < re.size(); ++i)
     {
         char ch = re[i];
@@ -148,292 +151,115 @@ std::vector<ReToken> tokenize_regex(const std::string& re)
             output.emplace_back(cls);
             continue;
         }
-        else if(is_regex_op(ch))
+
+        switch(ch)
         {
-            switch(ch)
-            {
-                case '|':
-                    output.emplace_back(OR, ch);
-                    break;
-                case '(':
-                    output.emplace_back(LPAREN, ch);
-                    break;
-                case ')':
-                    output.emplace_back(RPAREN, ch);
-                    break;
-                case '*':
-                    output.emplace_back(STAR, ch);
-                    break;
-                case '?':
-                    output.emplace_back(QMARK, ch);
-                    break;
-                case '+':
-                    output.emplace_back(PLUS, ch);
-                    break;
-                default:
-                    break;
-            }
-        }
-        else
-        {
-            output.emplace_back(LITERAL, ch);
+            case '|': output.emplace_back(RE_OR, ch); break;
+            case '(': output.emplace_back(RE_LPAREN, ch); break;
+            case ')': output.emplace_back(RE_RPAREN, ch); break;
+            case '*': output.emplace_back(RE_STAR, ch); break;
+            case '?': output.emplace_back(RE_OPTIONAL, ch); break;
+            case '+': output.emplace_back(RE_PLUS, ch); break;
+            default: output.emplace_back(RE_LITERAL, ch); break;
         }
     }
 
-    logger::debug("tokenize_regex token count: ", output.size());
     return output;
 }
 
-std::vector<ReToken> insert_concat(const std::vector<ReToken>& re)
+std::vector<RegexToken> insert_concat(const std::vector<RegexToken>& re)
 {
-    logger::debug("insert_concat input token count: ", re.size());
-
     if(re.empty()) return {};
 
-    std::vector<ReToken> output;
+    std::vector<RegexToken> output;
     output.emplace_back(re[0]);
     for(size_t i = 1; i < re.size(); ++i)
     {
         if(need_concat(re[i - 1], re[i]))
         {
-            output.emplace_back(CONCAT, '\0');
+            output.emplace_back(RE_CONCAT, '\0');
         }
         output.emplace_back(re[i]);
     }
 
-    logger::debug("insert_concat output token count: ", output.size());
     return output;
 }
 
-int re_op_prio(const ReToken& t)
+int regex_precedence(const RegexToken& t)
 {
     switch(t.type)
     {
-        case OR:
+        case RE_OR:
             return 1;
-        case CONCAT:
+        case RE_CONCAT:
             return 2;
-        case STAR:
-        case PLUS:
-        case QMARK:
+        case RE_STAR:
+        case RE_PLUS:
+        case RE_OPTIONAL:
             return 3;
         default:
             return 0;
     }
 }
 
-std::vector<ReToken> infix_to_postfix(const std::vector<ReToken>& infix)
+std::vector<RegexToken> infix_to_postfix(const std::vector<RegexToken>& infix)
 {
-    logger::debug("infix_to_postfix input token count: ", infix.size());
-    std::vector<ReToken> output;
-    std::stack<ReToken> ops;
+    std::vector<RegexToken> output;
+    std::stack<RegexToken> ops;
     for(const auto& token : infix)
     {
-        if(token.type == LITERAL || token.type == CHAR_CLASS)
+        if(is_regex_operand(token))
         {
             output.emplace_back(token);
-        }else if(token.type == LPAREN)
+        }
+        else if(token.type == RE_LPAREN)
         {
             ops.push(token);
-        }else if(token.type == RPAREN){
-            while(!ops.empty() && ops.top().type != LPAREN)
+        }
+        else if(token.type == RE_RPAREN)
+        {
+            while(!ops.empty() && ops.top().type != RE_LPAREN)
             {
                 output.emplace_back(ops.top());
                 ops.pop();
             }
-            if(!ops.empty() && ops.top().type == LPAREN)
+            if(ops.empty())
             {
-                ops.pop();
-            }else
-            {
-                logger::error("mismatched parentheses");
-                std::exit(EXIT_FAILURE);
+                die("mismatched parentheses");
             }
-        }else if(token.type == OR || token.type == CONCAT || token.type == STAR || token.type == PLUS || token.type == QMARK){
-            while(!ops.empty() && ops.top().type != LPAREN && re_op_prio(ops.top()) >= re_op_prio(token))
+
+            ops.pop();
+        }
+        else if(is_regex_operator(token))
+        {
+            while(!ops.empty() &&
+                  ops.top().type != RE_LPAREN &&
+                  regex_precedence(ops.top()) >= regex_precedence(token))
             {
                 output.emplace_back(ops.top());
                 ops.pop();
             }
             ops.push(token);
-        }else{
-            logger::error("invalid token in infix_to_postfix");
-            std::exit(EXIT_FAILURE);
+        }
+        else
+        {
+            die("invalid token in infix_to_postfix");
         }
     }
     while(!ops.empty())
     {
-        if(ops.top().type == LPAREN || ops.top().type == RPAREN)
+        if(ops.top().type == RE_LPAREN || ops.top().type == RE_RPAREN)
         {
-            logger::error("mismatched parentheses");
-            std::exit(EXIT_FAILURE);
+            die("mismatched parentheses");
         }
         output.emplace_back(ops.top());
         ops.pop();
     }
-    logger::debug("infix_to_postfix output token count: ", output.size());
     return output;
 }
 
 
-// ==================================== 后缀正则转NFA
-
-static constexpr int EPS = -1;
-static constexpr int ASCII_COUNT = 128;
-
-struct Edge
-{
-    int to;
-    int sym;   // 普通字符或 EPS
-};
-
-struct State
-{
-    std::vector<Edge> edges;
-    int token_kind = 0;   // 0 表示不是接受状态
-    int priority = std::numeric_limits<int>::max();
-};
-
-struct NFA
-{
-    std::vector<State> states;
-    int start = -1;
-    int accept = -1;
-};
-
-struct NFAFragment
-{
-    int start;
-    int accept;
-};
-
-int new_nfa_state(NFA& nfa)
-{
-    nfa.states.emplace_back();
-    return nfa.states.size() - 1;
-}
-
-void add_nfa_edge(NFA& nfa, int from, int to, int sym)
-{
-    nfa.states[from].edges.push_back({to, sym});
-}
-
-NFA build_nfa_from_postfix(const std::vector<ReToken>& postfix)
-{
-    logger::debug("build_nfa_from_postfix input token count: ", postfix.size());
-
-    NFA nfa;
-    std::stack<NFAFragment> st;
-
-    for(const auto& token : postfix)
-    {
-        if(token.type == LITERAL)
-        {
-            int s = new_nfa_state(nfa);
-            int t = new_nfa_state(nfa);
-            add_nfa_edge(nfa, s, t, token.val);
-            st.push({s, t});
-        }else if(token.type == CHAR_CLASS){
-            int s = new_nfa_state(nfa);
-            int t = new_nfa_state(nfa);
-            for(const auto& ch : token.char_set)
-            {
-                add_nfa_edge(nfa, s, t, ch);
-            }
-            st.push({s, t});
-        }else if(token.type == CONCAT){
-            NFAFragment r = st.top();
-            st.pop();
-            NFAFragment l = st.top();
-            st.pop();
-            add_nfa_edge(nfa, l.accept, r.start, EPS);
-            st.push({l.start, r.accept});
-        }else if(token.type == OR){
-            if(st.size() < 2)
-            {
-                logger::error("invalid regex: OR needs two operands");
-                std::exit(EXIT_FAILURE);
-            }
-            NFAFragment rhs = st.top();
-            st.pop();
-            NFAFragment lhs = st.top();
-            st.pop();
-            int s = new_nfa_state(nfa);
-            int t = new_nfa_state(nfa);
-            add_nfa_edge(nfa, s, lhs.start, EPS);
-            add_nfa_edge(nfa, s, rhs.start, EPS);
-            add_nfa_edge(nfa, lhs.accept, t, EPS);
-            add_nfa_edge(nfa, rhs.accept, t, EPS);
-            st.push({s, t});
-        }else if(token.type == STAR){
-            if(st.empty())
-            {
-                logger::error("invalid regex: STAR needs one operand");
-                std::exit(EXIT_FAILURE);
-            }
-            NFAFragment sub = st.top();
-            st.pop();
-            int s = new_nfa_state(nfa);
-            int t = new_nfa_state(nfa);
-            add_nfa_edge(nfa, s, sub.start, EPS);
-            add_nfa_edge(nfa, s, t, EPS);
-            add_nfa_edge(nfa, sub.accept, sub.start, EPS);
-            add_nfa_edge(nfa, sub.accept, t, EPS);
-            st.push({s, t});
-        }else if(token.type == PLUS){
-            if(st.empty())
-            {
-                logger::error("invalid regex: PLUS needs one operand");
-                std::exit(EXIT_FAILURE);
-            }
-            NFAFragment sub = st.top(); st.pop();
-            int s = new_nfa_state(nfa);
-            int t = new_nfa_state(nfa);
-            add_nfa_edge(nfa, s, sub.start, EPS);
-            add_nfa_edge(nfa, sub.accept, sub.start, EPS);
-            add_nfa_edge(nfa, sub.accept, t, EPS);
-            st.push({s, t});
-        }else if(token.type == QMARK){
-            if(st.empty())
-            {
-                logger::error("invalid regex: QMARK needs one operand");
-                std::exit(EXIT_FAILURE);
-            }
-            NFAFragment sub = st.top(); st.pop();
-            int s = new_nfa_state(nfa);
-            int t = new_nfa_state(nfa);
-            add_nfa_edge(nfa, s, sub.start, EPS);
-            add_nfa_edge(nfa, s, t, EPS);
-            add_nfa_edge(nfa, sub.accept, t, EPS);
-            st.push({s, t});
-        }else
-        {
-            logger::error("invalid token in postfix NFA construction");
-            std::exit(EXIT_FAILURE);
-        }
-    }
-
-    if(st.size() != 1)
-    {
-        logger::error("invalid regex: malformed postfix expression");
-        std::exit(EXIT_FAILURE);
-    }
-    NFAFragment res = st.top();
-    nfa.start = res.start;
-    nfa.accept = res.accept;
-    logger::debug("build_nfa_from_postfix state count: ", nfa.states.size());
-    return nfa;
-}
-
-NFA regex_to_nfa(const std::string& re)
-{
-    std::vector<ReToken> tokens = tokenize_regex(re);
-    std::vector<ReToken> infix = insert_concat(tokens);
-    std::vector<ReToken> postfix = infix_to_postfix(infix);
-    return build_nfa_from_postfix(postfix);
-}
-
-// ==================================== 合并多条词法规则
+// ==================================== token 类型
 
 enum TokenKind
 {
@@ -533,10 +359,215 @@ std::string token_kind_name(int kind)
     }
 }
 
-void mark_nfa_accept(NFA& nfa, int token_kind, int priority)
+// ==================================== 后缀正则转 NFA
+
+static constexpr int EPS = -1;
+static constexpr int ASCII_COUNT = 128;
+
+struct NFAEdge
+{
+    int to;
+    int symbol;   // 普通字符或 EPS
+};
+
+struct NFAState
+{
+    std::vector<NFAEdge> edges;
+    int token_kind = TK_NONE;
+    int rule_priority = std::numeric_limits<int>::max();
+};
+
+struct NFA
+{
+    std::vector<NFAState> states;
+    int start = -1;
+    int accept = -1;
+};
+
+struct NFAFragment
+{
+    int start;
+    int accept;
+};
+
+int new_nfa_state(NFA& nfa)
+{
+    nfa.states.emplace_back();
+    return nfa.states.size() - 1;
+}
+
+void add_nfa_edge(NFA& nfa, int from, int to, int symbol)
+{
+    nfa.states[from].edges.push_back({to, symbol});
+}
+
+NFAFragment pop_nfa_frag(std::stack<NFAFragment>& st, const std::string& error)
+{
+    if(st.empty())
+    {
+        die(error);
+    }
+
+    NFAFragment frag = st.top();
+    st.pop();
+    return frag;
+}
+
+NFAFragment symbol_frag(NFA& nfa, int symbol)
+{
+    int start = new_nfa_state(nfa);
+    int accept = new_nfa_state(nfa);
+    add_nfa_edge(nfa, start, accept, symbol);
+    return {start, accept};
+}
+
+NFAFragment char_class_frag(NFA& nfa, const std::vector<char>& chars)
+{
+    int start = new_nfa_state(nfa);
+    int accept = new_nfa_state(nfa);
+    for(char ch : chars)
+    {
+        add_nfa_edge(nfa, start, accept, ch);
+    }
+    return {start, accept};
+}
+
+NFAFragment concat_frag(NFA& nfa, NFAFragment lhs, NFAFragment rhs)
+{
+    add_nfa_edge(nfa, lhs.accept, rhs.start, EPS);
+    return {lhs.start, rhs.accept};
+}
+
+NFAFragment or_frag(NFA& nfa, NFAFragment lhs, NFAFragment rhs)
+{
+    int start = new_nfa_state(nfa);
+    int accept = new_nfa_state(nfa);
+    add_nfa_edge(nfa, start, lhs.start, EPS);
+    add_nfa_edge(nfa, start, rhs.start, EPS);
+    add_nfa_edge(nfa, lhs.accept, accept, EPS);
+    add_nfa_edge(nfa, rhs.accept, accept, EPS);
+    return {start, accept};
+}
+
+NFAFragment star_frag(NFA& nfa, NFAFragment sub)
+{
+    int start = new_nfa_state(nfa);
+    int accept = new_nfa_state(nfa);
+    add_nfa_edge(nfa, start, sub.start, EPS);
+    add_nfa_edge(nfa, start, accept, EPS);
+    add_nfa_edge(nfa, sub.accept, sub.start, EPS);
+    add_nfa_edge(nfa, sub.accept, accept, EPS);
+    return {start, accept};
+}
+
+NFAFragment plus_frag(NFA& nfa, NFAFragment sub)
+{
+    int start = new_nfa_state(nfa);
+    int accept = new_nfa_state(nfa);
+    add_nfa_edge(nfa, start, sub.start, EPS);
+    add_nfa_edge(nfa, sub.accept, sub.start, EPS);
+    add_nfa_edge(nfa, sub.accept, accept, EPS);
+    return {start, accept};
+}
+
+NFAFragment optional_frag(NFA& nfa, NFAFragment sub)
+{
+    int start = new_nfa_state(nfa);
+    int accept = new_nfa_state(nfa);
+    add_nfa_edge(nfa, start, sub.start, EPS);
+    add_nfa_edge(nfa, start, accept, EPS);
+    add_nfa_edge(nfa, sub.accept, accept, EPS);
+    return {start, accept};
+}
+
+int append_nfa(NFA& dst, const NFA& src)
+{
+    int offset = dst.states.size();
+
+    for(const auto& st : src.states)
+    {
+        dst.states.push_back(st);
+    }
+
+    for(size_t i = offset; i < dst.states.size(); ++i)
+    {
+        for(auto& edge : dst.states[i].edges)
+        {
+            edge.to += offset;
+        }
+    }
+
+    return offset;
+}
+
+NFA build_nfa_from_postfix(const std::vector<RegexToken>& postfix)
+{
+    NFA nfa;
+    std::stack<NFAFragment> st;
+
+    for(const auto& token : postfix)
+    {
+        switch(token.type)
+        {
+            case RE_LITERAL:
+                st.push(symbol_frag(nfa, token.ch));
+                break;
+            case RE_CHAR_CLASS:
+                st.push(char_class_frag(nfa, token.chars));
+                break;
+            case RE_CONCAT:
+            {
+                NFAFragment rhs = pop_nfa_frag(st, "invalid regex: concat needs two operands");
+                NFAFragment lhs = pop_nfa_frag(st, "invalid regex: concat needs two operands");
+                st.push(concat_frag(nfa, lhs, rhs));
+                break;
+            }
+            case RE_OR:
+            {
+                NFAFragment rhs = pop_nfa_frag(st, "invalid regex: or needs two operands");
+                NFAFragment lhs = pop_nfa_frag(st, "invalid regex: or needs two operands");
+                st.push(or_frag(nfa, lhs, rhs));
+                break;
+            }
+            case RE_STAR:
+                st.push(star_frag(nfa, pop_nfa_frag(st, "invalid regex: star needs one operand")));
+                break;
+            case RE_PLUS:
+                st.push(plus_frag(nfa, pop_nfa_frag(st, "invalid regex: plus needs one operand")));
+                break;
+            case RE_OPTIONAL:
+                st.push(optional_frag(nfa, pop_nfa_frag(st, "invalid regex: ? needs one operand")));
+                break;
+            default:
+                die("invalid token in postfix NFA construction");
+        }
+    }
+
+    if(st.size() != 1)
+    {
+        die("invalid regex: malformed postfix expression");
+    }
+    NFAFragment res = st.top();
+    nfa.start = res.start;
+    nfa.accept = res.accept;
+    return nfa;
+}
+
+NFA regex_to_nfa(const std::string& re)
+{
+    std::vector<RegexToken> tokens = tokenize_regex(re);
+    std::vector<RegexToken> infix = insert_concat(tokens);
+    std::vector<RegexToken> postfix = infix_to_postfix(infix);
+    return build_nfa_from_postfix(postfix);
+}
+
+// ==================================== 词法规则 NFA
+
+NFA token_nfa(int token_kind, int rule_priority, NFA nfa)
 {
     nfa.states[nfa.accept].token_kind = token_kind;
-    nfa.states[nfa.accept].priority = priority;
+    nfa.states[nfa.accept].rule_priority = rule_priority;
+    return nfa;
 }
 
 NFA literal_to_nfa(const std::string& text)
@@ -554,7 +585,7 @@ NFA literal_to_nfa(const std::string& text)
     return nfa;
 }
 
-NFA char_set_plus_to_nfa(const std::vector<char>& chars)
+NFA one_or_more_chars_nfa(const std::vector<char>& chars)
 {
     NFA nfa;
     int s = new_nfa_state(nfa);
@@ -599,7 +630,7 @@ bool is_normal_char_literal_char(int ch)
            ch != '\r';
 }
 
-bool is_escape_body_char(int ch)
+bool is_not_newline(int ch)
 {
     return ch >= 0 && ch < ASCII_COUNT &&
            ch != '\n' &&
@@ -615,7 +646,7 @@ NFA line_comment_to_nfa()
 
     add_nfa_edge(nfa, s, slash, '/');
     add_nfa_edge(nfa, slash, body, '/');
-    add_ascii_edges_if(nfa, body, body, is_escape_body_char);
+    add_ascii_edges_if(nfa, body, body, is_not_newline);
 
     nfa.start = s;
     nfa.accept = body;
@@ -671,7 +702,7 @@ NFA string_literal_to_nfa()
 
     add_nfa_edge(nfa, s, body, '"');
     add_ascii_edges_if(nfa, body, body, is_normal_string_char);
-    add_ascii_edges_if(nfa, esc, body, is_escape_body_char);
+    add_ascii_edges_if(nfa, esc, body, is_not_newline);
     add_nfa_edge(nfa, body, esc, '\\');
     add_nfa_edge(nfa, body, accept, '"');
 
@@ -691,7 +722,7 @@ NFA char_literal_to_nfa()
 
     add_nfa_edge(nfa, s, body, '\'');
     add_ascii_edges_if(nfa, body, one_char, is_normal_char_literal_char);
-    add_ascii_edges_if(nfa, esc, one_char, is_escape_body_char);
+    add_ascii_edges_if(nfa, esc, one_char, is_not_newline);
     add_nfa_edge(nfa, body, esc, '\\');
     add_nfa_edge(nfa, one_char, accept, '\'');
 
@@ -724,58 +755,17 @@ NFA float_literal_to_nfa()
     return nfa;
 }
 
-NFA make_regex_rule(int kind, int priority, const std::string& re)
-{
-    NFA nfa = regex_to_nfa(re);
-    mark_nfa_accept(nfa, kind, priority);
-    return nfa;
-}
-
-NFA make_literal_rule(int kind, int priority, const std::string& text)
-{
-    NFA nfa = literal_to_nfa(text);
-    mark_nfa_accept(nfa, kind, priority);
-    return nfa;
-}
-
-NFA make_char_set_plus_rule(int kind, int priority, const std::vector<char>& chars)
-{
-    NFA nfa = char_set_plus_to_nfa(chars);
-    mark_nfa_accept(nfa, kind, priority);
-    return nfa;
-}
-
-NFA make_nfa_rule(int kind, int priority, NFA nfa)
-{
-    mark_nfa_accept(nfa, kind, priority);
-    return nfa;
-}
-
 NFA combine_rules_to_nfa(const std::vector<NFA>& rules)
 {
-    logger::debug("combine_rules_to_nfa rule count: ", rules.size());
-
     NFA combined;
     combined.start = new_nfa_state(combined);
 
     for(const auto& rule : rules)
     {
-        int offset = combined.states.size();
-        for(const auto& st : rule.states)
-        {
-            combined.states.push_back(st);
-        }
-        for(size_t i = offset; i < combined.states.size(); ++i)
-        {
-            for(auto& e : combined.states[i].edges)
-            {
-                e.to += offset;
-            }
-        }
+        int offset = append_nfa(combined, rule);
         add_nfa_edge(combined, combined.start, rule.start + offset, EPS);
     }
 
-    logger::debug("combine_rules_to_nfa state count: ", combined.states.size());
     return combined;
 }
 
@@ -783,11 +773,10 @@ NFA combine_rules_to_nfa(const std::vector<NFA>& rules)
 
 struct DFAState
 {
-    std::vector<int> trans;
+    std::vector<int> next;
     int token_kind = TK_NONE;
-    std::set<int> nfa_states;
 
-    DFAState() : trans(ASCII_COUNT, -1) {}
+    DFAState() : next(ASCII_COUNT, -1) {}
 };
 
 struct DFA
@@ -796,9 +785,11 @@ struct DFA
     int start = -1;
 };
 
-std::set<int> epsilon_closure(const NFA& nfa, const std::set<int>& input)
+using StateSet = std::set<int>;
+
+StateSet epsilon_closure(const NFA& nfa, const StateSet& input)
 {
-    std::set<int> result = input;
+    StateSet result = input;
     std::stack<int> st;
     for(int s : input)
     {
@@ -811,7 +802,7 @@ std::set<int> epsilon_closure(const NFA& nfa, const std::set<int>& input)
         st.pop();
         for(const auto& e : nfa.states[cur].edges)
         {
-            if(e.sym == EPS && result.count(e.to) == 0)
+            if(e.symbol == EPS && result.count(e.to) == 0)
             {
                 result.insert(e.to);
                 st.push(e.to);
@@ -821,14 +812,14 @@ std::set<int> epsilon_closure(const NFA& nfa, const std::set<int>& input)
     return result;
 }
 
-std::set<int> move_set(const NFA& nfa, const std::set<int>& input, int sym)
+StateSet move_set(const NFA& nfa, const StateSet& input, int symbol)
 {
-    std::set<int> result;
+    StateSet result;
     for(int s : input)
     {
         for(const auto& e : nfa.states[s].edges)
         {
-            if(e.sym == sym)
+            if(e.symbol == symbol)
             {
                 result.insert(e.to);
             }
@@ -837,40 +828,41 @@ std::set<int> move_set(const NFA& nfa, const std::set<int>& input, int sym)
     return result;
 }
 
-void set_dfa_accept_from_nfa_states(DFAState& dstate, const NFA& nfa)
+int choose_token_kind(const NFA& nfa, const StateSet& nfa_states)
 {
     int best_priority = std::numeric_limits<int>::max();
-    for(int s : dstate.nfa_states)
+    int token_kind = TK_NONE;
+
+    for(int s : nfa_states)
     {
-        const State& nstate = nfa.states[s];
-        if(nstate.token_kind != TK_NONE && nstate.priority < best_priority)
+        const NFAState& nstate = nfa.states[s];
+        if(nstate.token_kind != TK_NONE && nstate.rule_priority < best_priority)
         {
-            dstate.token_kind = nstate.token_kind;
-            best_priority = nstate.priority;
+            token_kind = nstate.token_kind;
+            best_priority = nstate.rule_priority;
         }
     }
+
+    return token_kind;
 }
 
-int add_dfa_state(DFA& dfa, const NFA& nfa, const std::set<int>& nfa_states)
+int add_dfa_state(DFA& dfa, const NFA& nfa, const StateSet& nfa_states)
 {
     DFAState dstate;
-    dstate.nfa_states = nfa_states;
-    set_dfa_accept_from_nfa_states(dstate, nfa);
+    dstate.token_kind = choose_token_kind(nfa, nfa_states);
     dfa.states.push_back(dstate);
     return dfa.states.size() - 1;
 }
 
 DFA nfa_to_dfa(const NFA& nfa)
 {
-    logger::debug("nfa_to_dfa input state count: ", nfa.states.size());
-
     DFA dfa;
-    std::map<std::set<int>, int> ids;
-    std::queue<std::set<int>> work;
+    std::map<StateSet, int> ids;
+    std::queue<StateSet> work;
 
-    std::set<int> start_input;
+    StateSet start_input;
     start_input.insert(nfa.start);
-    std::set<int> start_set = epsilon_closure(nfa, start_input);
+    StateSet start_set = epsilon_closure(nfa, start_input);
 
     dfa.start = add_dfa_state(dfa, nfa, start_set);
     ids[start_set] = dfa.start;
@@ -878,64 +870,63 @@ DFA nfa_to_dfa(const NFA& nfa)
 
     while(!work.empty())
     {
-        std::set<int> cur_set = work.front();
+        StateSet cur_set = work.front();
         work.pop();
         int cur_id = ids[cur_set];
 
-        for(int sym = 0; sym < ASCII_COUNT; ++sym)
+        for(int symbol = 0; symbol < ASCII_COUNT; ++symbol)
         {
-            std::set<int> moved = move_set(nfa, cur_set, sym);
+            StateSet moved = move_set(nfa, cur_set, symbol);
             if(moved.empty())
             {
                 continue;
             }
 
-            std::set<int> next_set = epsilon_closure(nfa, moved);
+            StateSet next_set = epsilon_closure(nfa, moved);
             if(ids.count(next_set) == 0)
             {
                 int next_id = add_dfa_state(dfa, nfa, next_set);
                 ids[next_set] = next_id;
                 work.push(next_set);
             }
-            dfa.states[cur_id].trans[sym] = ids[next_set];
+            dfa.states[cur_id].next[symbol] = ids[next_set];
         }
     }
 
-    logger::debug("nfa_to_dfa output state count: ", dfa.states.size());
     return dfa;
 }
 
 // ==================================== DFA 最小化
 
-std::vector<int> build_minimize_signature(const DFA& dfa, const std::vector<int>& cls, int state)
+std::vector<int> build_minimize_signature(const DFA& dfa,
+                                          const std::vector<int>& partition,
+                                          int state)
 {
     std::vector<int> sig;
     sig.push_back(dfa.states[state].token_kind);
-    for(int sym = 0; sym < ASCII_COUNT; ++sym)
+    for(int symbol = 0; symbol < ASCII_COUNT; ++symbol)
     {
-        int to = dfa.states[state].trans[sym];
-        sig.push_back(to == -1 ? -1 : cls[to]);
+        int to = dfa.states[state].next[symbol];
+        sig.push_back(to == -1 ? -1 : partition[to]);
     }
     return sig;
 }
 
 DFA minimize_dfa(const DFA& dfa)
 {
-    logger::debug("minimize_dfa input state count: ", dfa.states.size());
-
     int n = dfa.states.size();
-    std::vector<int> cls(n, 0);
-    std::map<int, int> token_class;
+    std::vector<int> partition(n, 0);
+    std::map<int, int> initial_class_by_token;
     int class_count = 0;
 
     for(int i = 0; i < n; ++i)
     {
         int token = dfa.states[i].token_kind;
-        if(token_class.count(token) == 0)
+        if(initial_class_by_token.count(token) == 0)
         {
-            token_class[token] = class_count++;
+            initial_class_by_token[token] = class_count++;
         }
-        cls[i] = token_class[token];
+        partition[i] = initial_class_by_token[token];
     }
 
     bool changed = true;
@@ -943,35 +934,35 @@ DFA minimize_dfa(const DFA& dfa)
     {
         changed = false;
         std::map<std::vector<int>, int> sig_class;
-        std::vector<int> next_cls(n, 0);
+        std::vector<int> next_partition(n, 0);
         int next_count = 0;
 
         for(int i = 0; i < n; ++i)
         {
-            std::vector<int> sig = build_minimize_signature(dfa, cls, i);
+            std::vector<int> sig = build_minimize_signature(dfa, partition, i);
             if(sig_class.count(sig) == 0)
             {
                 sig_class[sig] = next_count++;
             }
-            next_cls[i] = sig_class[sig];
+            next_partition[i] = sig_class[sig];
         }
 
-        if(next_cls != cls)
+        if(next_partition != partition)
         {
             changed = true;
-            cls = next_cls;
+            partition = next_partition;
             class_count = next_count;
         }
     }
 
     DFA min_dfa;
     min_dfa.states.resize(class_count);
-    min_dfa.start = cls[dfa.start];
+    min_dfa.start = partition[dfa.start];
 
     std::vector<bool> filled(class_count, false);
     for(int i = 0; i < n; ++i)
     {
-        int c = cls[i];
+        int c = partition[i];
         if(filled[c])
         {
             continue;
@@ -979,14 +970,13 @@ DFA minimize_dfa(const DFA& dfa)
 
         filled[c] = true;
         min_dfa.states[c].token_kind = dfa.states[i].token_kind;
-        for(int sym = 0; sym < ASCII_COUNT; ++sym)
+        for(int symbol = 0; symbol < ASCII_COUNT; ++symbol)
         {
-            int to = dfa.states[i].trans[sym];
-            min_dfa.states[c].trans[sym] = to == -1 ? -1 : cls[to];
+            int to = dfa.states[i].next[symbol];
+            min_dfa.states[c].next[symbol] = to == -1 ? -1 : partition[to];
         }
     }
 
-    logger::debug("minimize_dfa output state count: ", min_dfa.states.size());
     return min_dfa;
 }
 
@@ -998,16 +988,16 @@ std::vector<NFA> build_min_c_rules()
     int p = 1;
 
     auto literal = [&](int kind, const std::string& text) {
-        rules.push_back(make_literal_rule(kind, p++, text));
+        rules.push_back(token_nfa(kind, p++, literal_to_nfa(text)));
     };
     auto regex = [&](int kind, const std::string& re) {
-        rules.push_back(make_regex_rule(kind, p++, re));
+        rules.push_back(token_nfa(kind, p++, regex_to_nfa(re)));
     };
     auto raw_nfa = [&](int kind, NFA nfa) {
-        rules.push_back(make_nfa_rule(kind, p++, nfa));
+        rules.push_back(token_nfa(kind, p++, nfa));
     };
 
-    rules.push_back(make_char_set_plus_rule(TK_SKIP, p++, {' ', '\t', '\n', '\r', '\f', '\v'}));
+    raw_nfa(TK_SKIP, one_or_more_chars_nfa({' ', '\t', '\n', '\r', '\f', '\v'}));
     raw_nfa(TK_SKIP, line_comment_to_nfa());
     raw_nfa(TK_SKIP, block_comment_to_nfa());
 
@@ -1104,7 +1094,7 @@ std::vector<Lexeme> scan_source(const DFA& dfa, const std::string& source)
                 break;
             }
 
-            int next = dfa.states[state].trans[ch];
+            int next = dfa.states[state].next[ch];
             if(next == -1)
             {
                 break;
